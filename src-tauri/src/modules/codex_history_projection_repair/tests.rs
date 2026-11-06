@@ -466,10 +466,13 @@ fn history_projection_repair_source_change_before_commit_rolls_back() {
 #[test]
 fn history_projection_repair_budget_and_profile_scope_are_enforced() {
     let budget = Budget {
-        started: Instant::now() - Duration::from_secs(46),
+        started: Instant::now() - MAX_SCAN_TIME - Duration::from_secs(1),
         bytes: 0,
     };
     assert!(budget.check().unwrap_err().contains("LIMIT"));
+    let mut budget = Budget::new();
+    budget.bytes = MAX_SCAN_BYTES;
+    assert!(budget.consume(1).unwrap_err().contains("byte budget"));
     let f = Fixture::new();
     let other = Fixture::new();
     assert!(apply(&other.root, &f.plan(), &other.root.join("backup"))

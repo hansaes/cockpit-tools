@@ -11,6 +11,13 @@ const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_CHAIN_DEPTH: usize = 128;
 
+/// Only the ordinal matters after the header; skipping payloads keeps large scans fast
+/// while serde still rejects malformed JSON.
+#[derive(serde::Deserialize)]
+struct OrdinalRecord {
+    ordinal: Option<u64>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Identity {
     volume: u64,
@@ -365,9 +372,9 @@ fn read(path: &Path, budget: &mut Budget) -> Result<Evidence, String> {
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let record: Value = serde_json::from_slice(&line)
-            .map_err(|_| error("UNSAFE_HISTORY", "rollout contains invalid JSON"))?;
-        if first {
+        let ordinal = if first {
+            let record: Value = serde_json::from_slice(&line)
+                .map_err(|_| error("UNSAFE_HISTORY", "rollout contains invalid JSON"))?;
             if record["type"] != "session_meta" || !record["payload"].is_object() {
                 return Err(error(
                     "UNSAFE_HISTORY",
@@ -407,13 +414,17 @@ fn read(path: &Path, budget: &mut Budget) -> Result<Evidence, String> {
                 base = Some(Base { id, bytes, ordinal });
             }
             first = false;
-            if record.get("ordinal").is_none() {
-                continue;
+            match record.get("ordinal") {
+                None => continue,
+                Some(value) => value.as_u64(),
             }
-        }
-        let ordinal = record["ordinal"]
-            .as_u64()
-            .ok_or_else(|| error("UNSAFE_HISTORY", "rollout record has no ordinal"))?;
+        } else {
+            serde_json::from_slice::<OrdinalRecord>(&line)
+                .map_err(|_| error("UNSAFE_HISTORY", "rollout contains invalid JSON"))?
+                .ordinal
+        };
+        let ordinal =
+            ordinal.ok_or_else(|| error("UNSAFE_HISTORY", "rollout record has no ordinal"))?;
         // Codex can stamp back-to-back events with one ordinal (e.g. token_count then
         // thread_settings_applied); a repeat loses nothing, only a gap does.
         if previous == Some(ordinal) {

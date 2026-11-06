@@ -16,7 +16,11 @@ mod storage;
 const HISTORY_DB: &str = "thread_history_1.sqlite";
 const STATE_DB: &str = "state_5.sqlite";
 const MAX_ENTRIES: usize = 100_000;
-const MAX_CANDIDATES: usize = 64;
+const MAX_CANDIDATES: usize = 1024;
+// Large profiles hold several GB of rollouts (zstd archives decode much larger), and each
+// source is both hashed and decoded, so the guard rails must cover hundreds of sessions.
+const MAX_SCAN_TIME: Duration = Duration::from_secs(10 * 60);
+const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct Plan {
@@ -59,7 +63,7 @@ impl Budget {
     }
 
     fn check(&self) -> Result<(), String> {
-        if self.started.elapsed() > Duration::from_secs(45) {
+        if self.started.elapsed() > MAX_SCAN_TIME {
             return Err(error(
                 "LIMIT",
                 "history scan exceeded its time budget; select fewer sessions",
@@ -71,7 +75,7 @@ impl Budget {
     fn consume(&mut self, bytes: usize) -> Result<(), String> {
         self.check()?;
         self.bytes = self.bytes.saturating_add(bytes as u64);
-        if self.bytes > 2 * 1024 * 1024 * 1024 {
+        if self.bytes > MAX_SCAN_BYTES {
             return Err(error(
                 "LIMIT",
                 "history scan exceeded its byte budget; select fewer sessions",

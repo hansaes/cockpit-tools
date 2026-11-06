@@ -93,13 +93,16 @@ fn fingerprint(projects: &[Project]) -> String {
 }
 
 fn snapshot(home: &Path, current: &Value) -> Result<Value, String> {
+    // Codex's atomic writes can leave `..codex-global-state.json.tmp-*` files behind; after the
+    // state and its rotated backups are reset these may be the only surviving project history.
+    let leftover = format!(".{STATE}.tmp-");
     let mut candidates = Vec::new();
     for entry in fs::read_dir(home).map_err(|e| e.to_string())?.take(512) {
         check()?;
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if name == STATE
-            || !name.starts_with(STATE)
+            || !(name.starts_with(STATE) || name.starts_with(&leftover))
             || !entry.file_type().is_ok_and(|t| t.is_file())
         {
             continue;

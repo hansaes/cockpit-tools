@@ -15,7 +15,7 @@ concurrency:
 jobs:
   # Tauri lib test binaries cannot start on Windows runners; upstream tests Rust on Ubuntu too.
   rust-tests:
-    name: "🧪 History projection repair tests"
+    name: "🧪 History and project repair tests"
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -40,7 +40,9 @@ jobs:
 
       - name: 🧪 Run tests
         working-directory: src-tauri
-        run: cargo test history_projection_repair --lib
+        run: |
+          cargo test history_projection_repair --lib
+          cargo test codex_local_project_recovery --lib
 
   build-windows:
     name: "🏗️ Build: Windows (unsigned)"

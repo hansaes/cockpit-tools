@@ -210,6 +210,18 @@ fn local_projects_restore_legacy_ids_and_preserve_explicit_projectless_and_newer
 }
 
 #[test]
+fn local_projects_deep_repair_reads_leftover_atomic_write_snapshots() {
+    let f = Fixture::new();
+    let host = host_key(&f.state(), f.home());
+    let old = json!({"local-projects":{"legacy":{"id":"legacy","rootPaths":[f.root]}},
+        MAP:{&host:{"legacy":"server"}},ASSIGN:{"chat":{"projectKind":"local","projectId":"legacy"}}});
+    atomic_value(&f.home().join(format!(".{STATE}.tmp-1789787407591-abc")), &old).unwrap();
+    // Unrelated dot-files must still be ignored.
+    atomic_value(&f.home().join(format!(".{STATE}x")), &json!({"local-projects":{"x":{}}})).unwrap();
+    f.apply(&f.scan());
+    assert_eq!(f.state()[ASSIGN]["chat"]["projectId"], "legacy");
+}
+#[test]
 fn local_projects_selected_scope_keeps_unrelated_projects_and_threads_untouched() {
     let f = Fixture::new();
     let other = f.home().join("Other");

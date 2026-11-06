@@ -13,6 +13,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Tauri lib test binaries cannot start on Windows runners; upstream tests Rust on Ubuntu too.
+  rust-tests:
+    name: "🧪 History projection repair tests"
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🐧 Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libssl-dev libnm-dev patchelf
+
+      - name: 🦀 Rust setup
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 💾 Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: 🧪 Run tests
+        working-directory: src-tauri
+        run: cargo test history_projection_repair --lib
+
   build-windows:
     name: "🏗️ Build: Windows (unsigned)"
     runs-on: windows-latest
@@ -42,9 +71,6 @@ jobs:
       - name: 🔄 Sync versions
         run: npm run sync-version
 
-      - name: 🧪 History projection repair tests
-        working-directory: src-tauri
-        run: cargo test history_projection_repair --lib
 
       - name: 🏗️ Build Windows app
         shell: bash

@@ -337,6 +337,7 @@ fn read(path: &Path, budget: &mut Budget) -> Result<Evidence, String> {
     let mut initial_ordinal = 0;
     let mut expected = 0;
     let mut has_ordinals = false;
+    let mut previous = None;
     let mut first = true;
     let mut base = None;
     loop {
@@ -413,6 +414,11 @@ fn read(path: &Path, budget: &mut Budget) -> Result<Evidence, String> {
         let ordinal = record["ordinal"]
             .as_u64()
             .ok_or_else(|| error("UNSAFE_HISTORY", "rollout record has no ordinal"))?;
+        // Codex can stamp back-to-back events with one ordinal (e.g. token_count then
+        // thread_settings_applied); a repeat loses nothing, only a gap does.
+        if previous == Some(ordinal) {
+            continue;
+        }
         if ordinal != expected {
             return Err(error(
                 "MISSING_RECORDS",
@@ -423,6 +429,7 @@ fn read(path: &Path, budget: &mut Budget) -> Result<Evidence, String> {
             .checked_add(1)
             .ok_or_else(|| error("UNSAFE_HISTORY", "rollout ordinal overflow"))?;
         has_ordinals = true;
+        previous = Some(ordinal);
         if expected % 64 == 0 {
             std::thread::yield_now();
         }

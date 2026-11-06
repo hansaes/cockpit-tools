@@ -219,6 +219,31 @@ fn history_projection_repair_missing_records_never_become_a_cache_reset() {
 }
 
 #[test]
+fn history_projection_repair_tolerates_repeated_ordinals_but_not_gaps() {
+    let f = Fixture::new();
+    let mut bytes = fs::read(&f.child).unwrap();
+    for item in [
+        json!({"ordinal":5,"type":"event_msg","payload":{"type":"thread_settings_applied"}}),
+        json!({"ordinal":6,"type":"event_msg","payload":{"type":"token_count"}}),
+        json!({"ordinal":6,"type":"event_msg","payload":{"type":"thread_settings_applied"}}),
+    ] {
+        bytes.extend(serde_json::to_vec(&item).unwrap());
+        bytes.push(b'\n');
+    }
+    fs::write(&f.child, &bytes).unwrap();
+    let plan = f.plan();
+    assert_eq!(plan.sources[CHILD].next_ordinal, 7);
+
+    let gap = json!({"ordinal":8,"type":"event_msg","payload":{"type":"token_count"}});
+    bytes.extend(serde_json::to_vec(&gap).unwrap());
+    bytes.push(b'\n');
+    fs::write(&f.child, &bytes).unwrap();
+    assert!(scan(&f.root, None, &|_, _| {})
+        .unwrap_err()
+        .contains("MISSING_RECORDS"));
+    assert_eq!(f.count(ROOT), 1);
+}
+#[test]
 fn history_projection_repair_rejects_truncated_compression_and_partial_json() {
     for compressed in [true, false] {
         let f = Fixture::new();

@@ -42,7 +42,7 @@ jobs:
         working-directory: src-tauri
         run: |
           cargo test history_projection_repair --lib
-          cargo test codex_local_project_recovery --lib
+          cargo test codex_session_visibility::local_projects --lib
 
   build-windows:
     name: "🏗️ Build: Windows (unsigned)"

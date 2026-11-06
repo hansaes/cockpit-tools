@@ -256,24 +256,57 @@ fn apply_with_checkpoints(
     for source in plan.sources.values() {
         source.recheck(&mut budget)?;
     }
+    let mut db = database(&plan.profile, HISTORY_DB, true)?;
+    if storage::schema(&db)? != plan.schema {
+        return Err(error("CHANGED", "history database schema changed"));
+    }
+    // Each batch gets its own bounded, verified backup and a short write transaction,
+    // so large selections neither exhaust memory nor hold the client's database lock.
+    let batches = storage::batches(&db, &plan.schema, &plan.candidates)?;
+    let mut repaired = 0;
+    for (index, batch) in batches.iter().enumerate() {
+        let directory = if batches.len() == 1 {
+            backup_dir.to_path_buf()
+        } else {
+            backup_dir.join(format!("part-{:03}", index + 1))
+        };
+        apply_batch(&mut db, plan, batch, &directory, checkpoint).map_err(|e| {
+            if repaired > 0 {
+                format!("{e}; reset_before_failure={repaired}")
+            } else {
+                e
+            }
+        })?;
+        repaired += batch.len();
+    }
+    Ok(repaired)
+}
+
+fn apply_batch(
+    db: &mut Connection,
+    plan: &Plan,
+    candidates: &[Checkpoint],
+    backup_dir: &Path,
+    checkpoint: &dyn Fn(),
+) -> Result<(), String> {
+    let mut budget = Budget::new();
     validate_selection(plan)?;
     if files::identity(&plan.profile.join(HISTORY_DB))? != plan.db_identity {
         return Err(error("CHANGED", "history database was replaced"));
     }
-    let mut db = database(&plan.profile, HISTORY_DB, true)?;
-    if storage::schema(&db)? != plan.schema {
+    if storage::schema(db)? != plan.schema {
         return Err(error("CHANGED", "history database schema changed"));
     }
     let snapshots = {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|e| error("DATABASE", e))?;
-        validate_cursors(&tx, plan)?;
-        let rows = storage::capture(&tx, &plan.schema, &plan.candidates, &mut budget)?;
+        validate_cursors(&tx, candidates)?;
+        let rows = storage::capture(&tx, &plan.schema, candidates, &mut budget)?;
         tx.commit().map_err(|e| error("DATABASE", e))?;
         rows
     };
-    storage::backup(backup_dir, plan, &snapshots, &mut budget)?;
+    storage::backup(backup_dir, plan, candidates, &snapshots, &mut budget)?;
     checkpoint();
     // Expensive decompression and hashing finished before acquiring the write transaction.
     for source in plan.sources.values() {
@@ -286,11 +319,11 @@ fn apply_with_checkpoints(
     if storage::schema(&tx)? != plan.schema {
         return Err(error("CHANGED", "history database schema changed"));
     }
-    validate_cursors(&tx, plan)?;
-    if storage::capture(&tx, &plan.schema, &plan.candidates, &mut budget)? != snapshots {
+    validate_cursors(&tx, candidates)?;
+    if storage::capture(&tx, &plan.schema, candidates, &mut budget)? != snapshots {
         return Err(error("CHANGED", "derived history changed after backup"));
     }
-    for candidate in &plan.candidates {
+    for candidate in candidates {
         for table in storage::TABLES {
             budget.check()?;
             tx.execute(
@@ -312,11 +345,11 @@ fn apply_with_checkpoints(
     }
     budget.check()?;
     tx.commit().map_err(|e| error("DATABASE", e))?;
-    Ok(plan.candidates.len())
+    Ok(())
 }
 
-fn validate_cursors(db: &Connection, plan: &Plan) -> Result<(), String> {
-    for expected in &plan.candidates {
+fn validate_cursors(db: &Connection, candidates: &[Checkpoint]) -> Result<(), String> {
+    for expected in candidates {
         if checkpoint(db, &expected.id)?.as_ref() != Some(expected) {
             return Err(error(
                 "CHANGED",

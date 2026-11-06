@@ -483,3 +483,23 @@ fn history_projection_repair_budget_and_profile_scope_are_enforced() {
         .unwrap_err()
         .contains("UNSAFE_HISTORY"));
 }
+
+#[test]
+fn history_projection_repair_splits_large_resets_into_bounded_batches() {
+    let f = Fixture::new();
+    let db = f.db();
+    cache(&db, OTHER, 1, 1);
+    let schema = storage::schema(&db).unwrap();
+    let candidates = [ROOT, CHILD, OTHER].map(|id| Checkpoint {
+        id: id.to_owned(),
+        offset: 0,
+        ordinal: 0,
+    });
+    // Each cached session holds one row in each of the four projection tables.
+    let all = storage::batches_within(&db, &schema, &candidates, 100, u64::MAX).unwrap();
+    assert_eq!(all.len(), 1);
+    let split = storage::batches_within(&db, &schema, &candidates, 8, u64::MAX).unwrap();
+    assert_eq!(split.iter().map(|b| b.len()).collect::<Vec<_>>(), [2, 1]);
+    let single = storage::batches_within(&db, &schema, &candidates, 1, 1).unwrap();
+    assert_eq!(single.len(), 3);
+}

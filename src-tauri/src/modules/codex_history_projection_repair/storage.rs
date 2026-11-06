@@ -12,8 +12,12 @@ pub(super) const TABLES: [&str; 4] = [
     "thread_turns",
     "thread_history_projection_state",
 ];
-const MAX_BACKUP_BYTES: usize = 64 * 1024 * 1024;
-const MAX_BACKUP_ROWS: usize = 20_000;
+// Hard caps for one in-memory batch snapshot; only a single huge session can reach them.
+const MAX_BACKUP_BYTES: usize = 256 * 1024 * 1024;
+const MAX_BACKUP_ROWS: usize = 200_000;
+// Batches are planned well below the caps because the footprint query is an estimate.
+const BATCH_BYTES: u64 = 32 * 1024 * 1024;
+const BATCH_ROWS: u64 = 20_000;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Schema {
@@ -476,6 +480,66 @@ pub(super) fn capture(
     })
 }
 
+/// Split candidates into consecutive batches whose derived rows fit a bounded backup.
+pub(super) fn batches<'a>(
+    db: &Connection,
+    schema: &Schema,
+    candidates: &'a [Checkpoint],
+) -> Result<Vec<&'a [Checkpoint]>, String> {
+    batches_within(db, schema, candidates, BATCH_ROWS, BATCH_BYTES)
+}
+
+pub(super) fn batches_within<'a>(
+    db: &Connection,
+    schema: &Schema,
+    candidates: &'a [Checkpoint],
+    max_rows: u64,
+    max_bytes: u64,
+) -> Result<Vec<&'a [Checkpoint]>, String> {
+    let mut result = Vec::new();
+    let mut start = 0;
+    let (mut rows, mut bytes) = (0, 0);
+    for (index, candidate) in candidates.iter().enumerate() {
+        let (count, size) = footprint(db, schema, &candidate.id)?;
+        if index > start && (rows + count > max_rows || bytes + size > max_bytes) {
+            result.push(&candidates[start..index]);
+            start = index;
+            (rows, bytes) = (0, 0);
+        }
+        rows += count;
+        bytes += size;
+    }
+    if start < candidates.len() {
+        result.push(&candidates[start..]);
+    }
+    Ok(result)
+}
+
+fn footprint(db: &Connection, schema: &Schema, id: &str) -> Result<(u64, u64), String> {
+    let (mut rows, mut bytes) = (0, 0);
+    for table in &schema.tables {
+        let size = table
+            .columns
+            .iter()
+            .map(|c| format!("COALESCE(LENGTH(CAST(\"{}\" AS BLOB)),0)", c.name))
+            .collect::<Vec<_>>()
+            .join("+");
+        let (count, total): (i64, Option<i64>) = db
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*),SUM({size}) FROM {} WHERE thread_id=?1",
+                    table.name
+                ),
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| error("DATABASE", e))?;
+        rows += count.max(0) as u64;
+        bytes += total.unwrap_or(0).max(0) as u64;
+    }
+    Ok((rows, bytes))
+}
+
 fn create_private(path: &Path) -> Result<fs::File, String> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -490,6 +554,7 @@ fn create_private(path: &Path) -> Result<fs::File, String> {
 pub(super) fn backup(
     directory: &Path,
     plan: &Plan,
+    candidates: &[Checkpoint],
     snapshot: &Snapshot,
     budget: &mut Budget,
 ) -> Result<(), String> {
@@ -552,7 +617,7 @@ pub(super) fn backup(
         .iter()
         .map(|(id, source)| (id.clone(), source.backup_metadata()))
         .collect::<std::collections::BTreeMap<_, _>>();
-    let metadata = serde_json::json!({"formatVersion":1,"profile":plan.profile,"sourceSchema":plan.schema.objects,"sourceMigrations":plan.schema.migrations,"sourceFiles":source_metadata,"projectionIds":plan.candidates.iter().map(|c|&c.id).collect::<Vec<_>>(),"typedRowsSha256":snapshot.digest});
+    let metadata = serde_json::json!({"formatVersion":1,"profile":plan.profile,"sourceSchema":plan.schema.objects,"sourceMigrations":plan.schema.migrations,"sourceFiles":source_metadata,"projectionIds":candidates.iter().map(|c|&c.id).collect::<Vec<_>>(),"typedRowsSha256":snapshot.digest});
     tx.execute(
         "INSERT INTO repair_metadata VALUES ('repair',?1)",
         [metadata.to_string()],
@@ -568,7 +633,7 @@ pub(super) fn backup(
     let integrity: String = verified
         .query_row("PRAGMA quick_check(1)", [], |r| r.get(0))
         .map_err(|e| error("BACKUP", e))?;
-    if integrity != "ok" || capture(&verified, &plan.schema, &plan.candidates, budget)? != *snapshot
+    if integrity != "ok" || capture(&verified, &plan.schema, candidates, budget)? != *snapshot
     {
         return Err(error("BACKUP", "typed history backup verification failed"));
     }
